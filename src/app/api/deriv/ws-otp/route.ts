@@ -5,6 +5,9 @@ import { cookies } from 'next/headers';
 export async function POST(request: Request) {
   try {
     const { account_id } = await request.json();
+    if (!account_id) {
+      return NextResponse.json({ error: 'Missing account_id' }, { status: 400 });
+    }
     const DERIV_APP_ID = process.env.DERIV_APP_ID || '33IM5dIMuFaBupAhk042L';
     
     const cookieStore = await cookies();
@@ -32,11 +35,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: errorData.message || 'OTP generation failed' }, { status: response.status });
     }
 
-    const json = await response.json();
+    const json = await response.json().catch(() => null);
+    const wsUrl = json?.data?.url;
+    if (!wsUrl) {
+      return NextResponse.json({ error: 'Deriv OTP response missing WebSocket URL' }, { status: 502 });
+    }
     // Return the authorized WebSocket URL containing the OTP
-    return NextResponse.json({ ws_url: json.data.url });
+    return NextResponse.json({ ws_url: wsUrl });
   } catch (error: any) {
     console.error('Deriv ws-otp route error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message || 'WS OTP Error' }, { status: 500 });
   }
 }

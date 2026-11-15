@@ -31,7 +31,7 @@ export function CopyTradingView() {
     setIsUpdating(true);
     
     try {
-      const socket = new WebSocket(`wss://ws.binaryws.com/websockets/v3?app_id=74546`);
+      const socket = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=74546`);
       
       socket.onopen = () => {
         socket.send(JSON.stringify({ authorize: apiToken }));
@@ -60,28 +60,31 @@ export function CopyTradingView() {
             
             toast({ title: "Neural Link Established", description: "API authorized and identity synced." });
             if (!authState.isLoggedIn) login(apiToken, 'api');
+            socket.onerror = null;
             socket.close();
           } else if (data.error) {
-            console.error('Copy trading authorization error:', data.error);
+            console.warn('Copy trading authorization error:', data.error?.message || data.error);
             toast({ variant: "destructive", title: "Auth Protocol Fault", description: data.error.message });
+            socket.onerror = null;
             socket.close();
           }
         } catch (parseErr) {
-          console.error('Copy trading message parse error:', parseErr);
+          console.warn('Copy trading message parse error:', parseErr);
           toast({ variant: "destructive", title: "Protocol Fault", description: "Invalid response from Deriv stream." });
+          socket.onerror = null;
           socket.close();
         } finally {
           setIsUpdating(false);
         }
       };
 
-      socket.onerror = (event) => {
-        console.error('Copy trading WebSocket error:', event);
+      socket.onerror = () => {
+        console.warn('Copy trading WebSocket connection failed.');
         toast({ variant: "destructive", title: "Connection Failed", description: "WebSocket connection failed." });
         setIsUpdating(false);
       };
     } catch (err) {
-      console.error('Copy trading token update error:', err);
+      console.warn('Copy trading token update error:', err);
       toast({ variant: "destructive", title: "Connection Failed", description: "Could not authorize token." });
       setIsUpdating(false);
     }

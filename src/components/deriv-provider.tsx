@@ -32,6 +32,7 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
   const [isInitializing, setIsInitializing] = useState(true);
   const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   const [activeRobotId, setActiveRobotId] = useState<RobotId>('calculation_dex');
   const [history, setHistory] = useState<TradeHistoryItem[]>([]);
   const [currentMartingaleLevel, setCurrentMartingaleLevel] = useState<number>(0);
@@ -63,6 +64,12 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
 
   const ws = useRef<WebSocket | null>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
+  const connectAttemptRef = useRef<number>(0);
+  const isManualDisconnectRef = useRef<boolean>(false);
+  const isUnmountedRef = useRef<boolean>(false);
+  const selectedSymbolRef = useRef<string>(selectedSymbol);
   const settingsRef = useRef(executionSettings);
   const historyRef = useRef(history);
   const pendingTradesRef = useRef<TradeHistoryItem[]>([]);
@@ -72,6 +79,28 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
   const isTradeInFlightRef = useRef<boolean>(false);
   const lastTradeMutationAtRef = useRef<number>(0);
   const handleSelfSettlementRef = useRef<(tick: Tick) => void>(() => {});
+
+  const closeSocketSafely = useCallback(() => {
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
+    if (ws.current) {
+      const existing = ws.current;
+      ws.current = null;
+      existing.onopen = null;
+      existing.onmessage = null;
+      existing.onerror = null;
+      existing.onclose = null;
+      if (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING) {
+        try {
+          existing.close();
+        } catch {
+          // Ignore close errors during teardown
+        }
+      }
+    }
+  }, []);
 
   const getSessionToken = useCallback(() => {
     if (patRef.current) return patRef.current;
@@ -289,15 +318,21 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
     setIsAnalyzingDex(false);
   }, [strategyParams.dexAnalysisMode, strategyParams.dexBarrier, strategyParams.dexPatternMinLen, strategyParams.dexPatternMaxLen, selectedSymbol]);
 
-  const connect = useCallback(async (accountId: string) => {
-    if (ws.current) {
-      ws.current.onclose = null;
-      ws.current.close();
-      ws.current = null;
-    }
-    if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+  const connect = useCallback(async (accountId: string, isReconnect = false) => {
+    if (!accountId || isUnmountedRef.current) return;
 
-    setIsAuthorizing(true);
+    isManualDisconnectRef.current = false;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
+    const attemptId = ++connectAttemptRef.current;
+    closeSocketSafely();
+
+    if (!isReconnect) {
+      setIsAuthorizing(true);
+    }
 
     try {
       const sessionToken = getSessionToken();
@@ -309,7 +344,10 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
         },
         body: JSON.stringify({ account_id: accountId })
       });
-      const otpData = await otpRes.json();
+
+      if (attemptId !== connectAttemptRef.current || isUnmountedRef.current) return;
+
+      const otpData = await otpRes.json().catch(() => ({}));
 
       if (otpRes.status === 401) {
         patRef.current = null;
@@ -317,45 +355,54 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
         localStorage.removeItem('deriv_auth');
         setAuthState({ isLoggedIn: false, isAdmin: false, accounts: [], activeAccountIndex: 0 });
         setIsConnected(false);
+        setIsReconnecting(false);
         setIsAuthorizing(false);
         toast({ variant: "destructive", title: "Session Expired", description: "Please authorize your Deriv token again." });
         return;
       }
       
-      if (!otpData.ws_url) throw new Error(otpData.error || 'WS URL Request Failed');
+      if (!otpRes.ok || !otpData.ws_url) {
+        throw new Error(otpData.error || 'WS URL Request Failed');
+      }
 
       const socket = new WebSocket(otpData.ws_url);
       ws.current = socket;
 
       socket.onopen = () => {
+        if (ws.current !== socket || isUnmountedRef.current) return;
+        reconnectAttemptsRef.current = 0;
         setIsConnected(true);
+        setIsReconnecting(false);
+        setIsAuthorizing(false);
+
         pingIntervalRef.current = setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ ping: 1 }));
         }, 10000);
 
         socket.send(JSON.stringify({ balance: 1, subscribe: 1 }));
         socket.send(JSON.stringify({ active_symbols: 'brief' }));
-        socket.send(JSON.stringify({ ticks: selectedSymbol, subscribe: 1 }));
+        socket.send(JSON.stringify({ ticks: selectedSymbolRef.current, subscribe: 1 }));
       };
 
       socket.onmessage = (msg) => {
+        if (ws.current !== socket || isUnmountedRef.current) return;
         let data: any;
         try {
           data = JSON.parse(msg.data);
         } catch (parseErr) {
-          console.error('Deriv WebSocket message parse error:', parseErr);
+          console.warn('Deriv WebSocket message parse error:', parseErr);
           return;
         }
 
         if (data.error) {
-          console.error('Deriv WebSocket API error:', data.error);
+          console.warn('Deriv WebSocket API error:', data.error?.message || data.error);
           toast({ variant: "destructive", title: "Stream Error", description: data.error.message || 'Deriv stream fault' });
           setIsAuthorizing(false);
           return;
         }
         
         if (data.msg_type === 'tick') {
-          if (data.tick.symbol === selectedSymbol) {
+          if (data.tick?.symbol === selectedSymbolRef.current) {
             const newTick = { quote: data.tick.quote, epoch: data.tick.epoch, id: `tick-${data.tick.epoch}` };
             setCurrentTicks(prev => {
               if (prev.length > 0 && prev[0].epoch === newTick.epoch) return prev;
@@ -403,20 +450,68 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
         }
       };
 
-      socket.onerror = (event) => {
-        console.error('Deriv WebSocket error:', event);
-        toast({ variant: "destructive", title: "Stream Connection Error", description: "WebSocket connection failed." });
+      socket.onerror = () => {
+        if (ws.current !== socket || isUnmountedRef.current || isManualDisconnectRef.current) return;
+        console.warn('Deriv WebSocket connection interrupted; waiting for close/reconnect.', {
+          readyState: socket.readyState,
+          accountId
+        });
         setIsConnected(false);
         setIsAuthorizing(false);
       };
 
-      socket.onclose = () => setIsConnected(false);
+      socket.onclose = (closeEvent) => {
+        if (ws.current !== socket) return;
+        ws.current = null;
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
+        }
+        setIsConnected(false);
+        setIsAuthorizing(false);
+
+        if (isUnmountedRef.current || isManualDisconnectRef.current) {
+          setIsReconnecting(false);
+          return;
+        }
+
+        const attempt = reconnectAttemptsRef.current;
+        if (attempt < 5 && activeAccountIdRef.current) {
+          const delayMs = Math.min(2000 * Math.pow(2, attempt), 15000);
+          reconnectAttemptsRef.current = attempt + 1;
+          setIsReconnecting(true);
+          reconnectTimerRef.current = setTimeout(() => {
+            if (!isUnmountedRef.current && !isManualDisconnectRef.current && activeAccountIdRef.current) {
+              connect(activeAccountIdRef.current, true);
+            }
+          }, delayMs);
+        } else {
+          setIsReconnecting(false);
+          toast({
+            variant: "destructive",
+            title: "Stream Connection Error",
+            description: closeEvent?.reason || "WebSocket connection failed. Please refresh or re-authorize."
+          });
+        }
+      };
     } catch (err: any) {
-      console.error('Deriv WebSocket connect error:', err);
-      toast({ variant: "destructive", title: "Auth Protocol Fault", description: err.message });
+      if (attemptId !== connectAttemptRef.current || isUnmountedRef.current) return;
+      console.warn('Deriv WebSocket connect error:', err?.message || err);
+      setIsConnected(false);
       setIsAuthorizing(false);
+      setIsReconnecting(false);
+      toast({ variant: "destructive", title: "Auth Protocol Fault", description: err?.message || "WebSocket handshake failed." });
     }
-  }, [selectedSymbol, handleSelfSettlement, processHistoricalData, getSessionToken]);
+  }, [closeSocketSafely, processHistoricalData, getSessionToken]);
+
+  useEffect(() => {
+    selectedSymbolRef.current = selectedSymbol;
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      setCurrentTicks([]);
+      ws.current.send(JSON.stringify({ forget_all: 'ticks' }));
+      ws.current.send(JSON.stringify({ ticks: selectedSymbol, subscribe: 1 }));
+    }
+  }, [selectedSymbol]);
 
   const fetchHistoricalData = (count: number) => {
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
@@ -633,6 +728,12 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = useCallback(() => {
+    isManualDisconnectRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    closeSocketSafely();
     patRef.current = null;
     sessionStorage.removeItem('deriv_pat_session');
     fetch('/api/deriv/login', { method: 'DELETE' }).catch((err) => {
@@ -641,7 +742,7 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
       localStorage.clear();
       window.location.reload();
     });
-  }, []);
+  }, [closeSocketSafely]);
 
   const magicSignal = useMemo(() => {
     if (currentTicks.length < 2) return null;
@@ -728,11 +829,18 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
+    isUnmountedRef.current = false;
     initSession();
     return () => {
       isMounted = false;
+      isUnmountedRef.current = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      closeSocketSafely();
     };
-  }, []);
+  }, [closeSocketSafely]);
 
   useEffect(() => {
     if (!isInitializing) {
@@ -794,7 +902,7 @@ export function DerivProvider({ children }: { children: React.ReactNode }) {
           ? (isHuntingInReal ? `REAL NODE ACTIVE (RECOVERY LVL ${currentMartingaleLevel})` : `VIRTUAL NODE: ${consecutiveVirtualLosses}/${executionSettings.lossHook} LOSSES`)
           : (currentMartingaleLevel > 0 ? `RECOVERY LEVEL ${currentMartingaleLevel}` : 'BASE STRIKE ACTIVE'),
       }, 
-      isConnected, isReconnecting: false, networkGlitch: false, aiGaps: { over: [], under: [] }, refreshCountdown: null,
+      isConnected, isReconnecting, networkGlitch: false, aiGaps: { over: [], under: [] }, refreshCountdown: null,
       isAnalyzingDex, historicalAnalysis,
       isMonitoringDex,
       setIsMonitoringDex: (val) => {
