@@ -1,0 +1,47 @@
+
+{
+  "entities": {
+    "UserProfile": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "UserProfile",
+      "type": "object",
+      "description": "Represents a user within the DerivEdge application, including their Deriv account details.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the UserProfile entity (Firebase UID)."
+        },
+        "email": {
+          "type": "string",
+          "description": "The email address associated with the user account."
+        },
+        "derivAccountId": {
+          "type": "string",
+          "description": "The unique identifier for the user's Deriv account."
+        },
+        "username": {
+          "type": "string",
+          "description": "Optional display name."
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  "auth": {
+    "providers": [
+      "anonymous",
+      "password"
+    ]
+  },
+  "firestore": {
+    "/user_profiles/{userId}": {
+      "schema": { "$ref": "#/backend/entities/UserProfile" },
+      "description": "Stores user profiles."
+    }
+  }
+}

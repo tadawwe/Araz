@@ -1,0 +1,16 @@
+{
+  "placeholderImages": [
+    {
+      "id": "deriv-bg",
+      "description": "Abstract financial trading background with blue tones.",
+      "imageUrl": "https://images.unsplash.com/photo-1640748397603-328288ecaf07?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHw4fHx0cmFkaW5nJTIwZmluYW5jZXxlbnwwfHx8fDE3NzE1NDM5OTF8MA&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "trading finance"
+    },
+    {
+      "id": "avatar-trader",
+      "description": "Professional trader profile avatar.",
+      "imageUrl": "https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHwzfHxwZXJzb24lMjBwcm9maWxlfGVufDB8fHx8MTc3MTQ5NTEzOHww&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "person profile"
+    }
+  ]
+}
